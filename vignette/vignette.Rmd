@@ -1,0 +1,152 @@
+---
+title: "CAISC Vignette"
+author: "Jeerthi Kannan, Liza Mathews, Shouguo Gao"
+date: "04/01/2021"
+abstract: Although both copy number variations (CNVs) and single nucleotide variations (SNVs) detected by scRNA-seq are used to study intratumor heterogeneity and detect clonal groups, a software to integrate two types of data in the same cells is unavailable. We have developed CAISC, an R package for scRNA-seq data analysis that clusters single cells into distinct subclones through integrating CNV and SNV genotype matrices with an entropy weighted approach. The CAISC package presents a powerful application for integration of CNV and SNV data from scRNA-seq to identify clonal clusters, with elevated accuracy compared to using one type of data. It also allows users to interactively examine clonal assignments.
+
+output: 
+   rmarkdown::html_document:
+     theme: united
+     highlight: tango
+     toc: true
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+# 1. Installation
+Install all packages in the latest version of [R](https://www.r-project.org/). The package works for R >=4.1.
+```{r, eval=FALSE}
+devtools::install_github("lizamathews/CAISC")
+```
+```{r load, echo=FALSE, include=FALSE}
+# load all necessary package libraries
+library(CAISC)
+
+library(igraph)
+library(leiden)
+library(leidenAlg)
+library(InteractiveComplexHeatmap)
+library(tidyverse)  # data manipulation
+library(cluster)    # clustering algorithms
+library(factoextra) # clustering visualization
+library(dendextend) # for comparing two dendrograms
+```
+
+# 2. Questions & issues
+If you have any questions or problems, please feel free to open a new issue [here](https://github.com/lizamathews/CAISC/issues/new). You can also email the maintainers of the package -- the contact information is below.
+
+* [Shouguo Gao]() (shouguo dot gao at nih dot gov)
+  <br>
+  NHLBI Hematopoiesis and Bone Marrow Failure Lab, Bethesda, MD
+
+* [Jeerthi Kannan]() (jeerthi dot kannan at gmail dot com)
+  <br>
+  NHLBI Hematopoiesis and Bone Marrow Failure Lab, Bethesda, MD
+  
+* [Liza Mathews]() (liza mathews 5 at gmail dot com)
+  <br>
+  NHLBI Hematopoiesis and Bone Marrow Failure Lab, Bethesda, MD
+
+# 3. CAISC Analysis pipeline
+## 3.1 Overall pipeline 
+
+```{r, out.width = "1000px", fig.align = "center", echo=FALSE}
+knitr::include_graphics("https://raw.githubusercontent.com/lizamathews/CAISC/master/figures/figure1.jpg")
+```
+  **Figure 1**. A flowchart outlining the procedures for CAISC.
+
+```{r, echo=FALSE}
+# find paths of raw data files
+vcfPath<-system.file("extdata", "GSE57872_merged.vcf", package = "CAISC")
+sampleidPath<-system.file("extdata", "SRR_ID.txt", package = "CAISC")
+expmatPath<-system.file("extdata", "expressionmatrix_28_29.txt", package = "CAISC")
+cellPath<-system.file("extdata", "annotationCell_28_29.txt", package = "CAISC")
+genePath<-system.file("extdata", "annotationGene_28_29.txt", package = "CAISC")
+```
+
+## 3.2 Generate SNV Mutation Distance Matrix
+
+Create a matrix of SNV mutations from a VCF file of mutations that appear in a minimal number of cells.
+```{r SNV matrix, eval=FALSE}
+# create SNV matrix of mutations
+createSNVMatrix(vcfPath, "DENDRO_input_10mutations.rda", sampleidPath, "snvDistanceMatrix.csv")
+```
+
+## 3.3 Generate CNV Mutation Distance Matrix
+
+Then, create a matrix of CNV mutations from a raw counts matrix containing assigned read counts, a sample annotation file, and a gene ordering file. Run only on a HPC cluster or a computer with at least 8 CPUs per task, 10GB of RAM, and 10GB of local scratch space
+```{r CNV matrix, eval=FALSE}
+# create CNV matrix of mutations
+createCNVMatrix(expmatPath, cellPath, genePath, "CSC", "GSE57872.RData")
+```
+
+## 3.4 Generate Integrated Distance Matrix from SNV and CNV Mutations
+
+Next, create an integrated matrix with the created SNV and CNV matrices as input.
+```{r integrated matrix}
+#load snv and cnv matrices
+snv_matrix <- as.matrix(read.csv("snvDistanceMatrix.csv", row.names = 1, header = TRUE))
+cnv_matrix <- as.matrix(read.csv("CNVdistMatrix.zscore.csv", row.names = 1, header = TRUE))
+
+# create and save integrated matrix
+integrated_matrix <- createIntegratedMatrix(cnv_matrix, snv_matrix)
+write.csv(integrated_matrix, file="integratedMatrix.csv", quote = FALSE)
+```
+
+## 3.5 Create and Examine Interactive Complex Heatmap
+
+Create an interactive complex heatmap from the SNV, CNV, integrated matrices, infercnv object, and the same gene ordering file used to create the CNV matrix. 
+```{r interactive complex heatmap}
+# create interactive complex heatmap
+heatmap <- createComplexHeatmap(snv_matrix, cnv_matrix, integrated_matrix, "GSE57872.RData", genePath)
+```
+
+Use Shiny web app to interactively examine the complex heatmap.
+```{r shiny, eval=FALSE}
+# use shiny to examine heatmap
+ht_shiny(heatmap)
+```
+
+The following is a static heatmap, but the interactive heatmap can be opened in the Shiny web app.
+```{r, out.width = "1000px", fig.align = "center", echo=FALSE}
+knitr::include_graphics("https://raw.githubusercontent.com/lizamathews/CAISC/master/figures/SampleHeatmapMGH28_29.png")
+```
+
+## 3.6 Create Tanglegram
+
+Create tanglegram of SNV and CNV clustering results, and calculate cophenetic correlation
+```{r tanglegram}
+# find cells in both snv and cnv matrices
+snv_matrix<-(snv_matrix-mean(snv_matrix))/sd(snv_matrix)
+overlapCells<-intersect(row.names(snv_matrix), rownames(cnv_matrix))
+
+# find clusters in snv matrix
+clust1=hclust(as.dist(snv_matrix[overlapCells,overlapCells]),method='ward.D')
+dend1=as.dendrogram(clust1)
+
+# find clusters in cnv matrix
+clust2=hclust(as.dist(cnv_matrix[overlapCells,overlapCells]),method='ward.D')
+dend2=as.dendrogram(clust2)
+
+# create tanglegram and find cophenetic correlation
+tanglegram(dend1, dend2, margin_inner = 10)
+cor.dendlist(dendlist(dend1=dend1, dend2=dend2))
+```
+
+# 4. Session info
+
+```{r sessionInfo}
+sessionInfo()
+```
+
+# 5. References
+
